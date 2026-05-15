@@ -9,6 +9,14 @@ class QuoteTick:
     timestamp_ms: int
     bid: float
     ask: float
+    local_received_ms: int | None = None
+    source: str = "DIRECT"
+    event_time_ms: int | None = None
+    sequence: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.local_received_ms is None:
+            self.local_received_ms = self.timestamp_ms
 
     @property
     def mid(self) -> float:

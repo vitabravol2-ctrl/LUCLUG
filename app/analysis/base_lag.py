@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Generic, Protocol, TypeVar
 
-from app.core.models import LagResult, PriceLeadLagDetail, QuoteTick
+from app.core.models import LagResult, PriceLeadLagDetail
 
 
 @dataclass(slots=True)
@@ -23,10 +23,6 @@ class LagModuleResult:
 
 
 DetailT = TypeVar("DetailT", bound=PriceLeadLagDetail)
-
-
-class HistoryProvider(Protocol):
-    def __call__(self, symbol: str) -> list[QuoteTick]: ...
 
 
 class LagModuleBase(Generic[DetailT]):
@@ -56,7 +52,7 @@ class LagModuleBase(Generic[DetailT]):
     def default_sort_score(self) -> str:
         return self.config.default_sort_score
 
-    def analyze(self, history: HistoryProvider) -> list[LagResult]:
+    def analyze(self, history_snapshot, latest_quotes, data_metrics) -> list[LagResult]:
         raise NotImplementedError
 
     def get_details(self, lag_ms: int) -> list[DetailT]:
