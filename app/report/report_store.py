@@ -18,16 +18,33 @@ class ReportStore:
         with self.session_file.open("a", encoding="utf-8") as fh:
             for row in rows:
                 fh.write(json.dumps({"ts": ts, "module_id": module_id, "lag_ms": row.lag_ms, "quality": row.signal_quality, "samples": row.samples, "match_pct": row.direction_match_pct, "avg_edge_u": row.avg_edge_u, "stability_pct": row.stability_pct, "confidence": row.confidence_score, "reason": row.reason, "source_leader": source_leader, "source_follower": source_follower}, ensure_ascii=False) + "\n")
-        self._log(f"[REPORT] saved {self.session_file}")
 
-    def export_summary(self, path: str, module_id: str, rows: list, selected_details_text: str) -> Path:
+    def export_summary(self, path: str, terminal_summary: str, module_rows: dict[str, list], selected_details_text: str) -> Path:
         out = Path(path)
         end = datetime.now(timezone.utc)
-        best_conf = max(rows, key=lambda r: r.confidence_score) if rows else None
-        best_stab = max(rows, key=lambda r: r.stability_pct) if rows else None
-        lines = [f"session_start={self.session_start.isoformat()}", f"session_end={end.isoformat()}", f"module={module_id}", f"best_confidence={best_conf.lag_ms if best_conf else '-'}", f"best_stability={best_stab.lag_ms if best_stab else '-'}", "rows:"]
-        for r in rows:
-            lines.append(f"{r.lag_ms}, {r.signal_quality}, {r.samples}, {r.direction_match_pct:.2f}, {r.avg_edge_u:.6f}, {r.stability_pct:.2f}, {r.confidence_score:.2f}, {r.reason}")
-        lines += ["", "selected_details:", selected_details_text]
+        lines = [f"session_start={self.session_start.isoformat()}", f"session_end={end.isoformat()}", "", "terminal_summary:", terminal_summary, "", "active_lag_rows:"]
+        for module_id, rows in module_rows.items():
+            lines.append(f"[{module_id}]")
+            for r in rows:
+                lines.append(f"{r.lag_ms}, {r.signal_quality}, conf={r.confidence_score:.2f}, samples={r.samples}, edge={r.avg_edge_u:.6f}, stability={r.stability_pct:.2f}, {r.reason}")
+            best = max(rows, key=lambda x: (x.confidence_score, x.stability_pct), default=None)
+            lines.append(f"best_lag={best.lag_ms if best else '-'}")
+            lines.append("")
+        lines += ["selected_lag_details:", selected_details_text]
         out.write_text("\n".join(lines), encoding="utf-8")
+        return out
+
+    def export_selected_lag(self, path: str, selected_details) -> Path:
+        out = Path(path)
+        r = selected_details.result
+        lines = [f"module={selected_details.module_id}", f"lag_ms={selected_details.lag_ms}"]
+        if r:
+            lines += [
+                f"quality={r.signal_quality}",
+                f"confidence={r.confidence_score:.2f}",
+                f"samples={r.samples}",
+                f"reason={r.reason}",
+            ]
+        out.write_text("\n".join(lines), encoding="utf-8")
+        self._log(f"[REPORT] exported {out}")
         return out

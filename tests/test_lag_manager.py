@@ -35,3 +35,20 @@ def test_disabled_lag_not_counted():
     m=LagManager(price_config=cfg)
     rows=m.analyze_all(_snap(),{},{} )['PRICE_LEAD_LAG']
     assert {r.lag_ms for r in rows} == {500}
+
+
+def test_best_lag_prefers_confidence_and_stability():
+    cfg=PriceLeadLagConfig(lags_ms=[300,500], enabled_lags={300:True,500:True})
+    m=LagManager(price_config=cfg)
+    rows=m.analyze_all(_snap(),{},{} )['PRICE_LEAD_LAG']
+    best=max(rows, key=lambda r: (r.confidence_score, r.stability_pct))
+    assert best.lag_ms in {300,500}
+
+
+def test_analyze_log_throttle():
+    logs=[]
+    m=LagManager(logger=logs.append, price_config=PriceLeadLagConfig(lags_ms=[500]))
+    m.analyze_all(_snap(),{},{} )
+    m.analyze_all(_snap(),{},{} )
+    analyze=[x for x in logs if x.startswith('[ANALYZE]')]
+    assert len(analyze) == 1

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 
 from app.analysis.base_lag import LagModuleBase
@@ -23,7 +22,7 @@ class LagManager:
         self.latest_results: dict[str, list[LagResult]] = {}
         self.selected_module_id: str = "PRICE_LEAD_LAG"
         self.selected_lag_ms: int | None = 500
-        self._last_analyze_log_ts = 0.0
+        self._last_analyze_state: dict[str, tuple] = {}
         self.register_module(PriceLeadLagAnalyzer(price_config or PriceLeadLagConfig()))
 
     def register_module(self, module: LagModuleBase) -> None:
@@ -35,15 +34,32 @@ class LagManager:
             rows = module.analyze(history_snapshot, latest_quotes, data_metrics) if module.enabled else []
             out[module_id] = rows
             if module.enabled:
-                best = rows[0] if rows else None
-                now = time.time()
-                if now - self._last_analyze_log_ts >= 2.0:
-                    self._log(
-                        f"[ANALYZE] {module_id} rows={len(rows)} best_lag={best.lag_ms if best else '-'} quality={best.signal_quality if best else 'WAIT'} confidence={best.confidence_score if best else 0:.2f}"
-                    )
-                    self._last_analyze_log_ts = now
+                self._log_analyze_if_changed(module_id, rows)
         self.latest_results = out
         return out
+
+    def _log_analyze_if_changed(self, module_id: str, rows: list[LagResult]) -> None:
+        best = rows[0] if rows else None
+        state = (
+            best.lag_ms if best else None,
+            best.signal_quality if best else "WAIT",
+            round(best.confidence_score, 2) if best else 0.0,
+            best.samples if best else 0,
+        )
+        prev = self._last_analyze_state.get(module_id)
+        should_log = prev is None
+        if prev is not None:
+            best_changed = prev[0] != state[0]
+            quality_changed = prev[1] != state[1]
+            confidence_changed = abs(prev[2] - state[2]) > 2.0
+            samples_changed = (state[3] - prev[3]) >= 500
+            should_log = best_changed or quality_changed or confidence_changed or samples_changed
+        if should_log:
+            self._log(
+                f"[ANALYZE] {module_id} best={best.lag_ms if best else '-'}ms {best.signal_quality if best else 'WAIT'} "
+                f"conf={best.confidence_score if best else 0:.2f} samples={best.samples if best else 0} edge={best.avg_edge_u if best else 0:+.2f}U"
+            )
+            self._last_analyze_state[module_id] = state
 
     def get_module_results(self, module_id) -> list[LagResult]:
         return self.latest_results.get(module_id, [])
