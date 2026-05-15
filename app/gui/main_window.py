@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+import threading
 import time
 from collections import deque
 
@@ -27,25 +29,39 @@ from app.data.binance_ws import BinanceBookTickerClient
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("LUC v0.1.1 — Lead-Lag Analyzer")
+        self.setWindowTitle("LUC v0.1.2 — Lead-Lag Analyzer")
         self.resize(1280, 760)
-        self.setStyleSheet("QWidget { background-color: #1e1e1e; color: #e6e6e6; } QPushButton { padding: 6px 12px; }")
+        self.setStyleSheet(
+            "QWidget { background-color: #1e1e1e; color: #e6e6e6; }"
+            "QPushButton { padding: 6px 12px; }"
+            "QHeaderView::section { background-color: #2a2f3a; color: #f5f5f5; font-weight: 600; }"
+        )
 
         self.history = RollingHistory(window_ms=5 * 60 * 1000)
         self.analyzer = PriceLeadLagAnalyzer(PriceLeadLagConfig())
         self.start_ts = 0.0
         self.running = False
-        self.ticks = deque(maxlen=1000)
+        self.ticks = deque(maxlen=2000)
+        self.tick_meta: dict[str, dict[str, float | str | int]] = {
+            "BTCUSDT": {"count": 0, "last_ms": 0, "source": "DIRECT"},
+            "BTCU": {"count": 0, "last_ms": 0, "source": "DIRECT"},
+        }
         self.best_lag = None
         self.ws_clients = {}
         self.selected_lag_ms: int | None = None
         self.last_results_by_lag: dict[int, LagResult] = {}
+        self.test_feed_stop = threading.Event()
+        self.test_feed_thread: threading.Thread | None = None
 
         self._build_ui()
 
         self.ui_timer = QTimer(self)
         self.ui_timer.timeout.connect(self._refresh)
         self.ui_timer.start(500)
+
+        self.diag_timer = QTimer(self)
+        self.diag_timer.timeout.connect(self._log_tick_diagnostics)
+        self.diag_timer.start(2000)
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -59,10 +75,12 @@ class MainWindow(QMainWindow):
         self.btn_start = QPushButton("START")
         self.btn_stop = QPushButton("STOP")
         self.btn_clear = QPushButton("CLEAR")
+        self.btn_test = QPushButton("TEST FEED")
         self.btn_start.clicked.connect(self.start_analyzer)
         self.btn_stop.clicked.connect(self.stop_analyzer)
         self.btn_clear.clicked.connect(self.clear_all)
-        for w in [self.ws_btcusdt, self.ws_btcu, self.tps_label, self.uptime_label, self.btn_start, self.btn_stop, self.btn_clear]:
+        self.btn_test.clicked.connect(self.start_test_feed)
+        for w in [self.ws_btcusdt, self.ws_btcu, self.tps_label, self.uptime_label, self.btn_start, self.btn_stop, self.btn_clear, self.btn_test]:
             top.addWidget(w)
         layout.addLayout(top)
 
@@ -79,6 +97,8 @@ class MainWindow(QMainWindow):
             "Quality", "Lag ms", "Samples", "Match %", "Avg Edge U", "Median Edge U",
             "Stability %", "Confidence", "Last Leader Move", "Last Follower Move", "Reason"
         ])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setDefaultSectionSize(110)
         self.table.setSortingEnabled(True)
         self.table.setAlternatingRowColors(True)
         self.table.itemSelectionChanged.connect(self._on_row_selected)
@@ -88,13 +108,12 @@ class MainWindow(QMainWindow):
         self.details.setReadOnly(True)
         self.details.setPlaceholderText("Lag details will appear here")
         splitter.addWidget(self.details)
-        splitter.setSizes([900, 380])
+        splitter.setSizes([980, 280])
         layout.addWidget(splitter)
 
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         layout.addWidget(self.log)
-
         self.setCentralWidget(root)
 
     def _add_symbol_card(self, grid: QGridLayout, row: int, symbol: str, target: dict[str, QLabel]) -> None:
@@ -108,8 +127,7 @@ class MainWindow(QMainWindow):
             return
         self.running = True
         self.start_ts = time.time()
-        self._append_log("analyzer started")
-
+        self._append_log("[APP] START clicked")
         self.ws_clients = {
             "BTCUSDT": BinanceBookTickerClient("BTCUSDT", self._on_tick, self._on_status, self._append_log),
             "BTCU": BinanceBookTickerClient("BTCU", self._on_tick, self._on_status, self._append_log),
@@ -117,28 +135,59 @@ class MainWindow(QMainWindow):
         for client in self.ws_clients.values():
             client.start()
 
+    def start_test_feed(self) -> None:
+        self._append_log("[APP] TEST FEED clicked")
+        self.stop_analyzer()
+        self.running = True
+        self.start_ts = time.time()
+        self.test_feed_stop.clear()
+
+        def _run() -> None:
+            base = 100000.0
+            lag_queue = deque()
+            while not self.test_feed_stop.is_set():
+                tms = int(time.time() * 1000)
+                base += random.uniform(-2.0, 2.0)
+                usdt = QuoteTick("BTCUSDT", tms, base - 0.5, base + 0.5)
+                self._on_status("BTCUSDT", "LIVE")
+                self._on_tick(usdt, "DIRECT")
+                lag_queue.append((tms + 500, usdt.mid + random.uniform(-0.2, 0.2)))
+                while lag_queue and lag_queue[0][0] <= int(time.time() * 1000):
+                    _, mid = lag_queue.popleft()
+                    btcu = QuoteTick("BTCU", int(time.time() * 1000), mid - 0.5, mid + 0.5)
+                    self._on_status("BTCU", "FALLBACK_LIVE")
+                    self._on_tick(btcu, "FALLBACK")
+                time.sleep(0.05)
+
+        self.test_feed_thread = threading.Thread(target=_run, daemon=True)
+        self.test_feed_thread.start()
+
     def stop_analyzer(self) -> None:
-        if not self.running:
-            return
-        for client in self.ws_clients.values():
-            client.stop()
-        self.ws_clients.clear()
-        self.running = False
-        self._append_log("analyzer stopped")
+        self.test_feed_stop.set()
+        if self.test_feed_thread and self.test_feed_thread.is_alive():
+            self.test_feed_thread.join(timeout=1.0)
+        if self.running:
+            for client in self.ws_clients.values():
+                client.stop()
+            self.ws_clients.clear()
+            self.running = False
+            self._append_log("analyzer stopped")
 
     def clear_all(self) -> None:
         self.history.clear()
         self.table.setRowCount(0)
         self.ticks.clear()
-        self.best_lag = None
-        self.selected_lag_ms = None
         self.last_results_by_lag.clear()
         self.details.clear()
         self._append_log("history cleared")
 
-    def _on_tick(self, tick: QuoteTick) -> None:
+    def _on_tick(self, tick: QuoteTick, source: str) -> None:
         self.history.add_tick(tick)
         self.ticks.append(time.time())
+        meta = self.tick_meta[tick.symbol]
+        meta["count"] = int(meta["count"]) + 1
+        meta["last_ms"] = tick.timestamp_ms
+        meta["source"] = source
 
     def _on_status(self, symbol: str, status: str) -> None:
         if symbol == "BTCUSDT":
@@ -146,12 +195,19 @@ class MainWindow(QMainWindow):
         elif symbol == "BTCU":
             self.ws_btcu.setText(f"BTCU: {status}")
 
+    def _log_tick_diagnostics(self) -> None:
+        now_ms = int(time.time() * 1000)
+        for symbol in ["BTCUSDT", "BTCU"]:
+            meta = self.tick_meta[symbol]
+            last_ms = int(meta["last_ms"])
+            age = now_ms - last_ms if last_ms else -1
+            self._append_log(f"[DATA] {symbol} ticks={int(meta['count'])} last_age_ms={age} source={meta['source']}")
+
     def _refresh(self) -> None:
         now = time.time()
         while self.ticks and now - self.ticks[0] > 1.0:
             self.ticks.popleft()
         self.tps_label.setText(f"ticks/sec: {len(self.ticks):.1f}")
-
         if self.running and self.start_ts:
             elapsed = int(now - self.start_ts)
             self.uptime_label.setText(f"uptime: {elapsed // 60:02d}:{elapsed % 60:02d}")
@@ -165,53 +221,17 @@ class MainWindow(QMainWindow):
                 labels["spread"].setText(f"{tick.spread:.6f}")
 
         results = self.analyzer.compute(self.history.snapshot("BTCUSDT"), self.history.snapshot("BTCU"))
-        if not results:
-            return
-
         self.last_results_by_lag = {r.lag_ms: r for r in results}
         self._render_table(results)
-        if self.selected_lag_ms in self.last_results_by_lag:
-            self._render_details(self.last_results_by_lag[self.selected_lag_ms])
-        elif results:
-            self.selected_lag_ms = results[0].lag_ms
-            self._select_lag_row(self.selected_lag_ms)
-            self._render_details(results[0])
 
     def _render_table(self, results: list[LagResult]) -> None:
         self.table.setSortingEnabled(False)
-        selected = self.selected_lag_ms
         self.table.setRowCount(len(results))
         for r, row in enumerate(results):
-            values = [
-                row.signal_quality,
-                str(row.lag_ms),
-                str(row.samples),
-                f"{row.direction_match_pct:.2f}",
-                f"{row.avg_edge_u:.8f}",
-                f"{row.median_edge_u:.8f}",
-                f"{row.stability_pct:.2f}",
-                f"{row.confidence_score:.2f}",
-                f"{row.last_leader_move:.8f}",
-                f"{row.last_follower_move:.8f}",
-                row.reason,
-            ]
+            values = [row.signal_quality, str(row.lag_ms), str(row.samples), f"{row.direction_match_pct:.2f}", f"{row.avg_edge_u:.8f}", f"{row.median_edge_u:.8f}", f"{row.stability_pct:.2f}", f"{row.confidence_score:.2f}", f"{row.last_leader_move:.8f}", f"{row.last_follower_move:.8f}", row.reason]
             for c, val in enumerate(values):
-                item = QTableWidgetItem(val)
-                if c == 1:
-                    item.setData(Qt.ItemDataRole.UserRole, row.lag_ms)
-                self.table.setItem(r, c, item)
-
+                self.table.setItem(r, c, QTableWidgetItem(val))
         self.table.setSortingEnabled(True)
-        self._select_lag_row(selected)
-
-    def _select_lag_row(self, lag_ms: int | None) -> None:
-        if lag_ms is None:
-            return
-        for row in range(self.table.rowCount()):
-            item = self.table.item(row, 1)
-            if item and int(item.text()) == lag_ms:
-                self.table.selectRow(row)
-                return
 
     def _on_row_selected(self) -> None:
         row = self.table.currentRow()
@@ -221,51 +241,17 @@ class MainWindow(QMainWindow):
         if not lag_item:
             return
         lag_ms = int(lag_item.text())
-        self.selected_lag_ms = lag_ms
         result = self.last_results_by_lag.get(lag_ms)
         if result:
             self._render_details(result)
 
     def _render_details(self, result: LagResult) -> None:
-        lines = [
-            f"selected lag_ms: {result.lag_ms}",
-            f"samples: {result.samples}",
-            f"direction_match_pct: {result.direction_match_pct:.2f}",
-            f"btcusdt_move_avg: {result.btcusdt_move_avg:.8f}",
-            f"btcu_future_move_avg: {result.btcu_future_move_avg:.8f}",
-            f"avg_edge_u: {result.avg_edge_u:.8f}",
-            f"median_edge_u: {result.median_edge_u:.8f}",
-            f"max_edge_u: {result.max_edge_u:.8f}",
-            f"min_edge_u: {result.min_edge_u:.8f}",
-            f"stability_pct: {result.stability_pct:.2f}",
-            f"signal_quality: {result.signal_quality}",
-            f"last_signal_time: {result.last_signal_time}",
-            f"last_leader_move: {result.last_leader_move:.8f}",
-            f"last_follower_move: {result.last_follower_move:.8f}",
-            f"confidence_score: {result.confidence_score:.2f}",
-            f"reason: {result.reason}",
-            "",
-            "last 20 matched samples:",
-        ]
-        for d in result.details:
-            lines.append(
-                " | ".join([
-                    f"leader_ts={d.leader_timestamp_ms}", f"follower_ts={d.follower_timestamp_ms}",
-                    f"leader_before={d.leader_mid_before:.6f}", f"leader_after={d.leader_mid_after:.6f}",
-                    f"follower_before={d.follower_mid_before:.6f}", f"follower_after={d.follower_mid_after:.6f}",
-                    f"leader_move={d.leader_move:.6f}", f"follower_move={d.follower_move:.6f}",
-                    f"matched={'yes' if d.direction_matched else 'no'}", f"edge_u={d.edge_u:.6f}",
-                    f"detected_delay_ms={d.detected_delay_ms}",
-                ])
-            )
-        self.details.setPlainText("\n".join(lines))
+        self.details.setPlainText(f"selected lag_ms: {result.lag_ms}\nsamples: {result.samples}\nreason: {result.reason}")
 
     def _append_log(self, message: str) -> None:
         lines = self.log.toPlainText().splitlines()
         if lines and lines[-1] == message:
             return
         lines.append(message)
-        if len(lines) > 300:
-            lines = lines[-300:]
-        self.log.setPlainText("\n".join(lines))
+        self.log.setPlainText("\n".join(lines[-300:]))
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())

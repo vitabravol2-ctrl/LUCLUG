@@ -9,7 +9,7 @@ from app.core.models import LagResult, PriceLeadLagDetail, QuoteTick
 
 
 DEFAULT_LAGS_MS = [50, 100, 200, 300, 500, 800, 1100, 1500, 2000]
-QUALITY_ORDER = {"HOT": 0, "GOOD": 1, "WATCH": 2, "BAD": 3}
+QUALITY_ORDER = {"HOT": 0, "GOOD": 1, "WATCH": 2, "WAIT": 3, "BAD": 4}
 
 
 @dataclass(slots=True)
@@ -23,9 +23,6 @@ class PriceLeadLagAnalyzer:
         self.config = config or PriceLeadLagConfig()
 
     def compute(self, btcusdt_ticks: list[QuoteTick], btcu_ticks: list[QuoteTick]) -> list[LagResult]:
-        if len(btcusdt_ticks) < 2 or len(btcu_ticks) < 2:
-            return []
-
         btcu_times = [t.timestamp_ms for t in btcu_ticks]
         results: list[LagResult] = []
 
@@ -129,6 +126,8 @@ class PriceLeadLagAnalyzer:
 
     @staticmethod
     def _classify(samples: int, direction_match_pct: float, stability_pct: float, avg_edge_u: float) -> str:
+        if samples == 0:
+            return "WAIT"
         if samples < 30 or direction_match_pct < 52:
             return "BAD"
         if samples >= 80 and direction_match_pct >= 60 and stability_pct >= 55 and avg_edge_u > 0:
@@ -141,6 +140,8 @@ class PriceLeadLagAnalyzer:
 
     @staticmethod
     def _reason(samples: int, direction_match_pct: float, stability_pct: float, avg_edge_u: float, confidence: float) -> str:
+        if samples == 0:
+            return "not enough samples"
         if samples < 30:
             return "not enough samples"
         if direction_match_pct < 52:
