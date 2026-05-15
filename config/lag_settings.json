@@ -1,0 +1,20 @@
+{
+  "PRICE_LEAD_LAG": {
+    "enabled": true,
+    "selected_lag_ms": 500,
+    "sort_by": "stability_pct",
+    "sort_desc": true,
+    "min_leader_move_u": 0.1,
+    "lags": {
+      "50": true,
+      "100": true,
+      "200": true,
+      "300": true,
+      "500": true,
+      "800": true,
+      "1100": true,
+      "1500": true,
+      "2000": true
+    }
+  }
+}
