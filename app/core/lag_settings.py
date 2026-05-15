@@ -11,6 +11,7 @@ DEFAULT_SETTINGS = {
         "sort_by": "stability_pct",
         "sort_desc": True,
         "min_leader_move_u": 0.1,
+        "tolerance_ms": 80,
         "lags": {str(k): True for k in [50, 100, 200, 300, 500, 800, 1100, 1500, 2000]},
     }
 }
