@@ -24,6 +24,8 @@ class PriceLeadLagConfig(LagModuleConfig):
     min_leader_move_u: float = 0.1
     sort_by: str = "stability_pct"
     sort_desc: bool = True
+    tolerance_ms: int = 80
+    max_details: int = 20
 
 
 class PriceLeadLagAnalyzer(LagModuleBase[PriceLeadLagDetail]):
@@ -35,7 +37,7 @@ class PriceLeadLagAnalyzer(LagModuleBase[PriceLeadLagDetail]):
         if not self.config.enabled:
             self._details_by_lag = {}
             return []
-        btcu_times = [t.timestamp_ms for t in btcu_ticks]
+        btcu_times = [t.local_received_ms or t.timestamp_ms for t in btcu_ticks]
         results: list[LagResult] = []
         self._details_by_lag = {}
 
@@ -53,14 +55,14 @@ class PriceLeadLagAnalyzer(LagModuleBase[PriceLeadLagDetail]):
                 lead_move = lead_cur.mid - lead_prev.mid
                 if lead_move == 0.0 or abs(lead_move) < self.config.min_leader_move_u:
                     continue
-                t0 = lead_cur.timestamp_ms
+                t0 = lead_cur.local_received_ms or lead_cur.timestamp_ms
                 t1 = t0 + lag_ms
                 idx0 = bisect_left(btcu_times, t0)
                 idx1 = bisect_left(btcu_times, t1)
-                if idx0 >= len(btcu_ticks) or idx1 >= len(btcu_ticks):
+                btcu_now = btcu_ticks[idx0] if idx0 < len(btcu_ticks) else None
+                btcu_future = self._nearest_tick(btcu_ticks, btcu_times, idx1, t1)
+                if btcu_now is None or btcu_future is None:
                     continue
-                btcu_now = btcu_ticks[idx0]
-                btcu_future = btcu_ticks[idx1]
                 follower_move = btcu_future.mid - btcu_now.mid
                 matched = (lead_move > 0 and follower_move > 0) or (lead_move < 0 and follower_move < 0)
                 if matched:
@@ -69,6 +71,7 @@ class PriceLeadLagAnalyzer(LagModuleBase[PriceLeadLagDetail]):
                 lead_moves.append(lead_move)
                 follower_moves.append(follower_move)
                 edges.append(edge_u)
+                delay_ms = (btcu_future.local_received_ms or btcu_future.timestamp_ms) - t0
                 details.append(
                     PriceLeadLagDetail(
                         leader_timestamp_ms=lead_cur.timestamp_ms,
@@ -81,7 +84,7 @@ class PriceLeadLagAnalyzer(LagModuleBase[PriceLeadLagDetail]):
                         follower_move=follower_move,
                         direction_matched=matched,
                         edge_u=edge_u,
-                        detected_delay_ms=max(0, btcu_future.timestamp_ms - lead_cur.timestamp_ms),
+                        detected_delay_ms=max(0, delay_ms),
                     )
                 )
             samples = len(details)
@@ -109,7 +112,7 @@ class PriceLeadLagAnalyzer(LagModuleBase[PriceLeadLagDetail]):
                 last_follower_move=last.follower_move if last else 0.0,
                 confidence_score=confidence_score,
                 reason=reason,
-                details=details[-20:],
+                details=details[-self.config.max_details:],
             )
             self._details_by_lag[lag_ms] = lag_result.details
             results.append(lag_result)
@@ -155,3 +158,15 @@ class PriceLeadLagAnalyzer(LagModuleBase[PriceLeadLagDetail]):
         if stability_pct >= 40 and avg_edge_u > 0:
             return "stable positive lag"
         return "unstable/noisy"
+
+    def _nearest_tick(self, ticks, times, pivot, target):
+        cands = []
+        for idx in (pivot - 1, pivot, pivot + 1):
+            if 0 <= idx < len(ticks):
+                cands.append((abs(times[idx] - target), ticks[idx]))
+        if not cands:
+            return None
+        cands.sort(key=lambda x: x[0])
+        if cands[0][0] > self.config.tolerance_ms:
+            return None
+        return cands[0][1]
