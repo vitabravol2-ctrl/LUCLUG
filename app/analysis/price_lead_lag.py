@@ -115,8 +115,8 @@ class PriceLeadLagAnalyzer(LagModuleBase[PriceLeadLagDetail]):
             results.append(lag_result)
         return self.sort_results(results)
 
-    def analyze(self, history) -> list[LagResult]:
-        return self.compute(history("BTCUSDT"), history("BTCU"))
+    def analyze(self, history_snapshot, latest_quotes=None, data_metrics=None) -> list[LagResult]:
+        return self.compute(history_snapshot.get("BTCUSDT", []), history_snapshot.get("BTCU", []))
 
     def get_details(self, lag_ms: int) -> list[PriceLeadLagDetail]:
         return self._details_by_lag.get(lag_ms, [])
